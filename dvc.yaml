@@ -6,8 +6,8 @@ stages:
     params:
     - data_ingestion.test_size
     outs:
-    - data/raw/test.csv
-    - data/raw/train.csv
+    - data/raw
+
   data_preprocessing:
     cmd: python src/data/data_preprocessing.py
     deps:
@@ -15,7 +15,7 @@ stages:
     - data/raw/test.csv
     - src/data/data_preprocessing.py
     outs:
-    - data/interim 
+    - data/interim
 
   model_building:
     cmd: python src/model/model_building.py
@@ -40,3 +40,11 @@ stages:
     - data/interim/train_processed.csv
     - data/interim/test_processed.csv
     - src/model/model_evaluation.py
+    outs:
+    - experiment_info.json
+
+  model_registration:
+    cmd: python src/model/register_model.py
+    deps:
+    - experiment_info.json
+    - src/model/register_model.py
