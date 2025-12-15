@@ -24,7 +24,8 @@ CORS(app)
 # CONFIG
 # ==========================================================
 MODEL_PATH = "lgbm_model.pkl"
-VECTORIZER_PATH = "tfidf_vectorizer.pkl" # <--- FINAL CORRECT FILE
+VECTORIZER_PATH = "tfidf_vectorizer.pkl"  
+ # <--- FINAL CORRECT FILE
 model = None
 vectorizer = None
 
@@ -63,7 +64,7 @@ def load_model():
         with open("lgbm_model.pkl", "rb") as f:
             model = pickle.load(f)
 
-        with open("tfidf_vectorizer_2.pkl", "rb") as f:
+        with open("tfidf_vectorizer.pkl", "rb") as f:
             vectorizer = pickle.load(f)
 
         print("✔ Model and vectorizer loaded successfully.")
