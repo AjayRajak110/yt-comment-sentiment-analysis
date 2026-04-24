@@ -177,3 +177,14 @@ wrapt==1.16.0
 yarl==1.9.4
 zc.lockfile==3.0.post1
 zipp==3.19.2
+
+# RAG Chatbot dependencies
+langchain
+langchain-community
+langchain-openai
+langchain-huggingface
+langchain-text-splitters
+faiss-cpu
+sentence-transformers
+python-dotenv
+youtube-transcript-api

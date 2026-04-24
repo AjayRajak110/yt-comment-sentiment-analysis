@@ -5,6 +5,7 @@ matplotlib.use('Agg')
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 import io
+import os
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 import numpy as np
@@ -13,9 +14,21 @@ import re
 import pandas as pd
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from mlflow.tracking import MlflowClient
 import matplotlib.dates as mdates
 import pickle
+from dotenv import load_dotenv
+
+# RAG Chatbot imports
+from youtube_transcript_api import YouTubeTranscriptApi
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
+from langchain_classic.chains import RetrievalQA
+
+# Load environment variables
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '.env'))
 
 app = Flask(__name__)
 CORS(app)
@@ -24,10 +37,24 @@ CORS(app)
 # CONFIG
 # ==========================================================
 MODEL_PATH = "lgbm_model.pkl"
-VECTORIZER_PATH = "tfidf_vectorizer.pkl"  
- # <--- FINAL CORRECT FILE
+VECTORIZER_PATH = "tfidf_vectorizer.pkl"
 model = None
 vectorizer = None
+
+# ==========================================================
+# CHATBOT CONFIG — In-memory session store
+# ==========================================================
+# Stores { video_id: { "qa_chain": ..., "title": ... } }
+chat_sessions = {}
+
+# Load embeddings model once at startup (reused across sessions)
+print("Loading HuggingFace embeddings model...")
+try:
+    embeddings_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    print("✔ Embeddings model loaded successfully.")
+except Exception as e:
+    print(f"❌ Error loading embeddings model: {e}")
+    embeddings_model = None
 
 
 # ==========================================================
@@ -278,6 +305,151 @@ def generate_trend_graph():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Trend graph generation failed: {str(e)}"}), 500
+
+
+# ==========================================================
+# CHATBOT — Initialize session for a YouTube video
+# ==========================================================
+@app.route("/chat/init", methods=["POST"])
+def chat_init():
+    """
+    Initialize a RAG chatbot session for a YouTube video.
+    Fetches the video transcript, splits it, creates embeddings,
+    and stores the QA chain in memory keyed by video_id.
+
+    Request body: { "video_url": "https://www.youtube.com/watch?v=..." }
+    Response:     { "status": "ready", "video_id": "...", "title": "...", "chunks": N }
+    """
+    if embeddings_model is None:
+        return jsonify({"error": "Embeddings model failed to load. Check server logs."}), 500
+
+    data = request.get_json()
+    video_url = data.get("video_url")
+
+    if not video_url:
+        return jsonify({"error": "No video_url provided"}), 400
+
+    try:
+        # Extract video_id from URL
+        video_id_match = re.search(r'(?:v=|/)([A-Za-z0-9_-]{11})', video_url)
+        if not video_id_match:
+            return jsonify({"error": "Invalid YouTube URL"}), 400
+        video_id = video_id_match.group(1)
+
+        # Return early if already initialized
+        if video_id in chat_sessions:
+            session = chat_sessions[video_id]
+            return jsonify({
+                "status": "ready",
+                "video_id": video_id,
+                "title": session.get("title", "Unknown"),
+                "chunks": session.get("chunks", 0),
+                "message": "Session already active"
+            })
+
+        # 1. Fetch transcript using youtube-transcript-api (more reliable than pytube)
+        print(f"📥 Fetching transcript for video: {video_id}")
+        try:
+            api = YouTubeTranscriptApi()
+            transcript = api.fetch(video_id)
+            transcript_text = " ".join([snippet.text for snippet in transcript])
+        except Exception as transcript_err:
+            print(f"❌ Transcript error: {transcript_err}")
+            return jsonify({"error": "No transcript found for this video. The video may not have English captions."}), 404
+
+        if not transcript_text.strip():
+            return jsonify({"error": "Transcript is empty for this video."}), 404
+
+        video_title = f"Video {video_id}"
+        print(f"✔ Loaded transcript ({len(transcript_text)} chars)")
+
+        # 2. Split into chunks
+        transcript_docs = [Document(page_content=transcript_text, metadata={"source": video_url, "video_id": video_id})]
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks = splitter.split_documents(transcript_docs)
+        print(f"✔ Split into {len(chunks)} chunks")
+
+        # 3. Create vector store
+        vector_store = FAISS.from_documents(chunks, embeddings_model)
+        print("✔ Vector store created")
+
+        # 4. Build QA chain
+        hf_token = os.getenv("HUGGINGFACEHUB_ACCESS_TOKEN")
+        if not hf_token:
+            return jsonify({"error": "HUGGINGFACEHUB_ACCESS_TOKEN not set in .env file"}), 500
+
+        llm = ChatOpenAI(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            openai_api_key=hf_token,
+            openai_api_base="https://router.huggingface.co/v1",
+        )
+
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=vector_store.as_retriever()
+        )
+
+        # Store session
+        chat_sessions[video_id] = {
+            "qa_chain": qa_chain,
+            "title": video_title,
+            "chunks": len(chunks),
+        }
+
+        print(f"✔ Chat session ready for: {video_title}")
+
+        return jsonify({
+            "status": "ready",
+            "video_id": video_id,
+            "title": video_title,
+            "chunks": len(chunks),
+        })
+
+    except Exception as e:
+        print(f"❌ Chat init error: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to initialize chat: {str(e)}"}), 500
+
+
+# ==========================================================
+# CHATBOT — Ask a question about the video
+# ==========================================================
+@app.route("/chat/ask", methods=["POST"])
+def chat_ask():
+    """
+    Ask a question about a video's content using the RAG chain.
+
+    Request body: { "video_id": "...", "question": "..." }
+    Response:     { "answer": "...", "video_id": "..." }
+    """
+    data = request.get_json()
+    video_id = data.get("video_id")
+    question = data.get("question")
+
+    if not video_id:
+        return jsonify({"error": "No video_id provided"}), 400
+    if not question:
+        return jsonify({"error": "No question provided"}), 400
+
+    session = chat_sessions.get(video_id)
+    if not session:
+        return jsonify({"error": "Chat session not found. Call /chat/init first."}), 404
+
+    try:
+        qa_chain = session["qa_chain"]
+        result = qa_chain.invoke(question)
+        answer = result.get("result", "Sorry, I couldn't find an answer.")
+
+        return jsonify({
+            "answer": answer,
+            "video_id": video_id,
+        })
+
+    except Exception as e:
+        print(f"❌ Chat ask error: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Failed to get answer: {str(e)}"}), 500
 
 
 # ==========================================================

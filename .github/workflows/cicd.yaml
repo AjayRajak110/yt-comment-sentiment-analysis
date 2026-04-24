@@ -86,7 +86,11 @@ jobs:
             docker login --username AWS --password-stdin 390844758498.dkr.ecr.us-east-1.amazonaws.com
 
       - name: Build Docker image
-        run: docker build -t yt-chrome-plugin .
+        env:
+          HUGGINGFACEHUB_ACCESS_TOKEN: ${{ secrets.HUGGINGFACEHUB_ACCESS_TOKEN }}
+        run: |
+          echo "HUGGINGFACEHUB_ACCESS_TOKEN=${HUGGINGFACEHUB_ACCESS_TOKEN}" > .env
+          docker build -t yt-chrome-plugin .
 
       - name: Tag Docker image
         run: docker tag yt-chrome-plugin:latest 390844758498.dkr.ecr.us-east-1.amazonaws.com/yt-chrome-plugin:latest
