@@ -1,4 +1,4 @@
-# yt-comment-sentiment-analysis
+# yt-comment-sentiment-analysis-video-chat
 # 🚀 Project Name  
 **A Production-Ready Machine Learning Pipeline (Cookiecutter Data Science Structure)**  
 
